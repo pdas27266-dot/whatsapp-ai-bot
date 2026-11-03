@@ -6,54 +6,58 @@ const pino = require('pino');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// বটের নম্বর ও বসের নম্বর
 const BOT_PHONE_NUMBER = '8801739241206';
-const BOSS_JID = '8801789631882@s.whatsapp.net';
+let ACTIVE_BOSS_JID = '8801789631882@s.whatsapp.net';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const chatHistories = new Map();
 const humanPausedChats = new Map();
-const messageQueues = new Map();
 const debounceTimers = new Map();
+const messageQueues = new Map();
 let bossCustomRules = '';
 let currentPairingCode = '';
 
-const BASE_SYSTEM_INSTRUCTION = `
-তুমি একটি অনলাইন শপের অত্যন্ত বিনয়ী, আন্তরিক ও বাস্তবমুখী বিক্রেতা।
-কঠোর নিয়মাবলী:
-১. কোনো বড় আনুষ্ঠানিক ডায়লগ দেবে না। সাধারণ মানুষ যেভাবে হোয়াটসঅ্যাপে ১-২ লাইনে চ্যাট করে সেভাবে উত্তর দেবে।
-২. কাস্টমার যদি বলে "আচ্ছা", "একটু পর মেসেজ দিচ্ছি" বা "দাঁড়ান", তখন বলবে "আচ্ছা ঠিক আছে, কোনো সমস্যা নেই।"
-৩. কাস্টমার অর্ডার কনফার্ম করতে চাইলে শুধু নাম, ঠিকানা ও ১১ ডিজিটের মোবাইল নম্বর চাইবে।
-৪. কাস্টমার সব তথ্য দিলে তবেই বলবে: "ধন্যবাদ! আপনার অর্ডারটি গ্রহণ করা হয়েছে।" এবং উত্তরের শেষে লিখবে [ORDER_COMPLETED]।
-৫. কোনো তথ্য জানা না থাকলে বলবে "আমি চেক করে জানাচ্ছি" এবং শেষে লিখবে [NEED_HELP]।
+const SYSTEM_INSTRUCTION = `
+তুমি একটি অনলাইন শপের অত্যন্ত দ্রুত, বিনয়ী ও চটপটে সেলস অ্যাসিস্ট্যান্ট।
+কঠোর নিয়ম:
+১. সবসময় ১-২ লাইনে মিষ্টি ও স্বাভাবিক বাংলায় দ্রুত উত্তর দেবে। কোনো আনুষ্ঠানিক ডায়লগ দেবে না।
+২. তোমার জানা তথ্য এবং বসের দেওয়া তথ্যের বাইরে কোনো মনগড়া বা আন্দাজে কথা বলবে না।
+৩. কাস্টমার যদি এমন কোনো পণ্যের দাম বা তথ্য জানতে চায় যা বসের নিয়মে নেই, তবে সরাসরি বলবে: "একটু অপেক্ষা করুন, আমি চেক করে জানাচ্ছি।" এবং উত্তরের শেষে অবশ্যই [HELP_NEEDED] লিখবে।
+৪. কাস্টমার অর্ডার করতে চাইলে শুধু নাম, ঠিকানা ও ১১ ডিজিটের নম্বর চেয়ে নেবে। সব তথ্য পাওয়ার পর বলবে: "ধন্যবাদ! আপনার অর্ডারটি গ্রহণ করা হয়েছে।" এবং শেষে [ORDER_COMPLETED] লিখবে।
 `;
 
 async function generateAIReply(jid, userText) {
   let history = chatHistories.get(jid) || [];
   history.push({ role: 'user', text: userText });
-  if (history.length > 8) history = history.slice(-8);
+  if (history.length > 6) history = history.slice(-6);
   chatHistories.set(jid, history);
 
-  const fullPrompt = `${BASE_SYSTEM_INSTRUCTION}\nবসের বিশেষ নিয়মাবলী:\n${bossCustomRules}`;
+  const fullPrompt = `${SYSTEM_INSTRUCTION}\nবসের শেখানো পণ্যের তথ্য ও নিয়মাবলী:\n${bossCustomRules}`;
   const conversation = history.map(h => `${h.role === 'user' ? 'Customer' : 'Seller'}: ${h.text}`).join('\n');
 
-  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash-latest'];
-
-  for (const modelName of candidateModels) {
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: conversation,
+      config: { systemInstruction: fullPrompt, temperature: 0.3 }
+    });
+    const reply = typeof response.text === 'function' ? response.text() : response.text;
+    if (reply) {
+      history.push({ role: 'model', text: reply.trim() });
+      chatHistories.set(jid, history);
+      return reply.trim();
+    }
+  } catch (e) {
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
+      const fallback = await ai.models.generateContent({
+        model: 'gemini-2.0-flash',
         contents: conversation,
-        config: { systemInstruction: fullPrompt, temperature: 0.4 }
+        config: { systemInstruction: fullPrompt, temperature: 0.3 }
       });
-      const reply = typeof response.text === 'function' ? response.text() : response.text;
-      if (reply) {
-        history.push({ role: 'model', text: reply.trim() });
-        chatHistories.set(jid, history);
-        return reply.trim();
-      }
-    } catch (e) {}
+      const fallbackText = typeof fallback.text === 'function' ? fallback.text() : fallback.text;
+      if (fallbackText) return fallbackText.trim();
+    } catch (err) {}
   }
   return null;
 }
@@ -68,16 +72,15 @@ async function startBot() {
     browser: ['Ubuntu', 'Chrome', '20.0.04']
   });
 
-  // পেয়ারিং কোড তৈরির রিকোয়েস্ট (যদি ডিভাইস কানেক্ট না থাকে)
   if (!sock.authState.creds.registered) {
     setTimeout(async () => {
       try {
         let code = await sock.requestPairingCode(BOT_PHONE_NUMBER);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         currentPairingCode = code;
-        console.log(`Pairing Code তৈরি হয়েছে: ${currentPairingCode}`);
+        console.log(`Pairing Code: ${currentPairingCode}`);
       } catch (err) {
-        console.error('Pairing code তৈরিতে সমস্যা:', err.message);
+        console.error('Pairing Code Error:', err.message);
       }
     }, 4000);
   }
@@ -86,12 +89,11 @@ async function startBot() {
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
-
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) startBot();
     } else if (connection === 'open') {
-      console.log('WhatsApp সফলভাবে চালু হয়েছে!');
+      console.log('WhatsApp Connected!');
       currentPairingCode = '';
     }
   });
@@ -106,20 +108,32 @@ async function startBot() {
       const userText = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
       if (!userText) continue;
 
-      const isBoss = jid.includes('01789631882') || jid === BOSS_JID;
-      if (isBoss && (userText.startsWith('!শিখুন') || userText.startsWith('!learn'))) {
-        const newInstruction = userText.replace(/^(!শিখুন|!learn)\s*[:]?\s*/i, '').trim();
-        bossCustomRules += `\n- ${newInstruction}`;
-        await sock.sendMessage(jid, { text: `✅ বস, নতুন তথ্য যুক্ত করেছি:\n"${newInstruction}"` });
+      const cleanText = userText.trim();
+
+      // ==========================================
+      // ১. তাৎক্ষণিক বস ট্রেনিং (কোনো বিলম্ব ছাড়া ১ সেকেন্ডে শিখবে)
+      // ==========================================
+      if (cleanText.startsWith('!শিখুন') || cleanText.startsWith('!learn')) {
+        ACTIVE_BOSS_JID = jid; // আপনার আইডি অটো সেভ করে নেবে
+        const newRule = cleanText.replace(/^(!শিখুন|!learn)\s*[:]?\s*/i, '').trim();
+        if (newRule) {
+          bossCustomRules += `\n- ${newRule}`;
+          await sock.sendMessage(jid, { 
+            text: `✅ বস, তথ্যটি সাথে সাথে মুখস্থ করে নিয়েছি!\n📌 "${newRule}"\nএখন থেকে কাস্টমার জানতে চাইলে ৩ সেকেন্ডে উত্তর দেব।` 
+          });
+        }
         continue;
       }
 
-      if (isBoss && (userText === '!নিয়ম' || userText === '!rules')) {
-        await sock.sendMessage(jid, { text: `📋 সংরক্ষিত নিয়মাবলী:\n${bossCustomRules || 'এখনো কোনো নিয়ম যোগ করা হয়নি।'}` });
+      if (cleanText === '!নিয়ম' || cleanText === '!rules') {
+        ACTIVE_BOSS_JID = jid;
+        await sock.sendMessage(jid, { 
+          text: `📋 বর্তমানে মুখস্থ থাকা তথ্যাবলী:\n${bossCustomRules || 'এখনো কোনো তথ্য যোগ করা হয়নি।'}` 
+        });
         continue;
       }
 
-      // আপনি মেসেজ পাঠালে ৫ মিনিট পজ
+      // আপনি মেসেজ পাঠালে ৫ মিনিট মিউট
       if (msg.key.fromMe) {
         humanPausedChats.set(jid, Date.now() + 5 * 60 * 1000);
         continue;
@@ -128,6 +142,9 @@ async function startBot() {
       const pauseUntil = humanPausedChats.get(jid) || 0;
       if (Date.now() < pauseUntil) continue;
 
+      // ==========================================
+      // ২. মাত্র ৮০০ms বাফার (৩-৫ সেকেন্ডে রিপ্লাই সম্পন্ন হবে)
+      // ==========================================
       let queue = messageQueues.get(jid) || [];
       queue.push(userText);
       messageQueues.set(jid, queue);
@@ -137,33 +154,35 @@ async function startBot() {
       }
 
       debounceTimers.set(jid, setTimeout(async () => {
-        const fullUserMessage = (messageQueues.get(jid) || []).join(' ');
+        const fullMessage = (messageQueues.get(jid) || []).join(' ');
         messageQueues.delete(jid);
         debounceTimers.delete(jid);
 
         try {
-          let replyText = await generateAIReply(jid, fullUserMessage);
+          let replyText = await generateAIReply(jid, fullMessage);
           if (!replyText) return;
 
-          if (replyText.includes('[ORDER_COMPLETED]')) {
-            replyText = replyText.replace('[ORDER_COMPLETED]', '').trim();
-            await sock.sendMessage(BOSS_JID, {
-              text: `📦 *নতুন অর্ডার অ্যালার্ট!*\nকাস্টমার: ${jid.replace('@s.whatsapp.net', '')}\nতথ্য: ${fullUserMessage}`
+          // না বুঝলে বসকে অ্যালার্ট
+          if (replyText.includes('[HELP_NEEDED]')) {
+            replyText = replyText.replace('[HELP_NEEDED]', '').trim();
+            await sock.sendMessage(ACTIVE_BOSS_JID, {
+              text: `⚠️ *বস, কাস্টমারের সাহায্য প্রয়োজন!*\n💬 প্রশ্ন: "${fullMessage}"\n👉 আমি বলেছি চেক করে জানাচ্ছি, আপনি একটু ইনবক্সে দেখুন।`
             });
           }
 
-          if (replyText.includes('[NEED_HELP]')) {
-            replyText = replyText.replace('[NEED_HELP]', '').trim();
-            await sock.sendMessage(BOSS_JID, {
-              text: `⚠️ *সাহায্য প্রয়োজন!*\nকাস্টমার: "${fullUserMessage}"\nনম্বর: ${jid.replace('@s.whatsapp.net', '')}`
+          // অর্ডার অ্যালার্ট
+          if (replyText.includes('[ORDER_COMPLETED]')) {
+            replyText = replyText.replace('[ORDER_COMPLETED]', '').trim();
+            await sock.sendMessage(ACTIVE_BOSS_JID, {
+              text: `📦 *নতুন অর্ডার এসেছে!*\n💬 তথ্য: ${fullMessage}`
             });
           }
 
           await sock.sendMessage(jid, { text: replyText });
         } catch (err) {
-          console.error('মেসেজ প্রসেসিং এরর:', err.message);
+          console.error('Error:', err.message);
         }
-      }, 3000));
+      }, 800));
     }
   });
 }
@@ -172,15 +191,12 @@ app.get('/', (req, res) => {
   if (currentPairingCode) {
     res.send(`
       <div style="text-align:center;margin-top:60px;font-family:sans-serif;">
-        <h2 style="color:#333;">আপনার WhatsApp পেয়ারিং কোড:</h2>
-        <div style="display:inline-block;background:#f0fdf4;border:2px dashed #22c55e;padding:15px 30px;border-radius:12px;margin:20px 0;">
-          <h1 style="font-size:42px;letter-spacing:6px;color:#16a34a;margin:0;">${currentPairingCode}</h1>
-        </div>
-        <p style="color:#666;font-size:16px;">WhatsApp-এর <b>"Enter code"</b> পেজে এই কোডটি লিখুন।</p>
+        <h2>WhatsApp পেয়ারিং কোড:</h2>
+        <h1 style="font-size:45px;color:#16a34a;letter-spacing:6px;">${currentPairingCode}</h1>
       </div>
     `);
   } else {
-    res.send('<h2 style="text-align:center;color:green;margin-top:60px;">বট সক্রিয় রয়েছে এবং WhatsApp যুক্ত আছে!</h2>');
+    res.send('<h2 style="text-align:center;color:green;margin-top:60px;">বট সক্রিয় রয়েছে!</h2>');
   }
 });
 
