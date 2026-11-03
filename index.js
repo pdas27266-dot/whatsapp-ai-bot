@@ -1,4 +1,4 @@
-;const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 const QRCode = require('qrcode');
@@ -9,42 +9,54 @@ const port = process.env.PORT || 3000;
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+// চ্যাট মেমোরি এবং ওনার টেকওভার ট্র্যাকিং
+const chatHistories = new Map();
+const humanPausedChats = new Map();
+
 const SYSTEM_INSTRUCTION = `
-তুমি একটি অনলাইন স্টোরের অত্যন্ত বিনয়ী, আন্তরিক এবং প্রফেশনাল কাস্টমার সেলস অ্যাসিস্ট্যান্ট।
-দায়িত্ব:
-১. কাস্টমারের যেকোনো প্রশ্নের সাবলীল বাংলায় সুন্দর উত্তর দেওয়া।
-২. কাস্টমার অর্ডার করতে চাইলে বিনয়ের সাথে ৩টি তথ্য চেয়ে নেবে:
-   - কাস্টমারের পুরো নাম
-   - ডেলিভারির পূর্ণাঙ্গ ঠিকানা
-   - সচল মোবাইল নম্বর (১১ ডিজিট)
-৩. তথ্যগুলো পাওয়ার পর সুন্দরভাবে অর্ডার সামারি দেখিয়ে কনফার্মেশন চাইবে।
-৪. উত্তর সংক্ষিপ্ত ও প্রফেশনাল রাখবে।
+তুমি একটি অনলাইন স্টোরের বিক্রেতা।
+কঠোরভাবে নিচের নিয়মগুলো মানবে:
+১. কোনো অপ্রয়োজনীয় আনুষ্ঠানিকতা বা বড় ভাষণ দেবে না (যেমন: "আমাদের স্টোরে স্বাগতম", "আমি আপনার সেলস অ্যাসিস্ট্যান্ট" ইত্যাদি সম্পূর্ণ নিষিদ্ধ)।
+২. উত্তর সবসময় খুব সংক্ষিপ্ত (১ থেকে ২ লাইন) এবং সাধারণ মানুষ যেভাবে হোয়াটসঅ্যাপে চ্যাট করে ঠিক সেভাবে দেবে।
+৩. কাস্টমার যদি অর্ডার সংক্রান্ত কোনো তথ্য বা কনফার্মেশন দেয়, তবে শুধু বলবে "ধন্যবাদ, আপনার তথ্য পেয়েছি।" 
+৪. কাস্টমার দাম বা পণ্য জানতে চাইলে সরাসরি পয়েন্টে উত্তর দেবে।
 `;
 
-// অটোমেটিক লেটেস্ট মডেল ট্রাই করার ফাংশন
-async function generateAIReply(userText) {
+async function generateAIReply(jid, userText) {
+  let history = chatHistories.get(jid) || [];
+  history.push({ role: 'user', text: userText });
+  if (history.length > 6) history = history.slice(-6);
+  chatHistories.set(jid, history);
+
   const candidateModels = [
     'gemini-2.5-flash',
     'gemini-2.0-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-2.5-pro'
+    'gemini-1.5-flash-latest'
   ];
+
+  const conversationPrompt = history
+    .map(h => `${h.role === 'user' ? 'Customer' : 'Seller'}: ${h.text}`)
+    .join('\n');
 
   for (const modelName of candidateModels) {
     try {
       const response = await ai.models.generateContent({
         model: modelName,
-        contents: userText,
+        contents: conversationPrompt,
         config: {
           systemInstruction: SYSTEM_INSTRUCTION,
-          temperature: 0.7
+          temperature: 0.4
         }
       });
 
       const reply = typeof response.text === 'function' ? response.text() : response.text;
-      if (reply) return reply;
+      if (reply) {
+        history.push({ role: 'model', text: reply.trim() });
+        chatHistories.set(jid, history);
+        return reply.trim();
+      }
     } catch (e) {
-      console.log(`মডেল ${modelName} চেষ্টা করা হচ্ছে...`);
+      // পরবর্তী মডেলে চেষ্টা করবে
     }
   }
   return null;
@@ -72,11 +84,8 @@ async function startBot() {
 
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) {
-        startBot();
-      }
+      if (shouldReconnect) startBot();
     } else if (connection === 'open') {
-      console.log('WhatsApp সফলভাবে যুক্ত হয়েছে!');
       qrCodeData = '';
     }
   });
@@ -85,7 +94,20 @@ async function startBot() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      if (msg.key.fromMe || msg.key.remoteJid.endsWith('@g.us')) continue;
+      const jid = msg.key.remoteJid;
+      if (!jid || jid.endsWith('@g.us')) continue;
+
+      // আপনি মেসেজ পাঠালে বট ৫ মিনিট মিউট থাকবে
+      if (msg.key.fromMe) {
+        humanPausedChats.set(jid, Date.now() + 5 * 60 * 1000);
+        continue;
+      }
+
+      // চ্যাটটি ওনারের নিয়ন্ত্রণে আছে কি না চেক
+      const pauseUntil = humanPausedChats.get(jid) || 0;
+      if (Date.now() < pauseUntil) {
+        continue; 
+      }
 
       const userText = msg.message?.conversation || 
                        msg.message?.extendedTextMessage?.text;
@@ -93,13 +115,12 @@ async function startBot() {
       if (!userText) continue;
 
       try {
-        const replyText = await generateAIReply(userText);
+        const replyText = await generateAIReply(jid, userText);
         if (replyText) {
-          await sock.sendMessage(msg.key.remoteJid, { text: replyText });
-          console.log(`সফলভাবে উত্তর পাঠানো হয়েছে: ${msg.key.remoteJid}`);
+          await sock.sendMessage(jid, { text: replyText });
         }
       } catch (err) {
-        console.error('মেসেজ পাঠাতে সমস্যা:', err.message);
+        console.error('Error sending message:', err.message);
       }
     }
   });
@@ -107,23 +128,12 @@ async function startBot() {
 
 app.get('/', (req, res) => {
   if (qrCodeData) {
-    res.send(`
-      <div style="text-align:center;margin-top:50px;font-family:sans-serif;">
-        <h2>WhatsApp দিয়ে QR কোডটি স্ক্যান করুন</h2>
-        <img src="${qrCodeData}" style="width:300px;height:300px;border:1px solid #ccc;padding:10px;border-radius:10px;" />
-      </div>
-    `);
+    res.send(`<div style="text-align:center;margin-top:50px;"><img src="${qrCodeData}" style="width:300px;"/></div>`);
   } else {
-    res.send(`
-      <div style="text-align:center;margin-top:50px;font-family:sans-serif;">
-        <h2 style="color:green;">বট সক্রিয় রয়েছে!</h2>
-        <p>WhatsApp কানেকশন চালু আছে।</p>
-      </div>
-    `);
+    res.send('<h2 style="text-align:center;color:green;margin-top:50px;">বট সক্রিয় রয়েছে!</h2>');
   }
 });
 
 app.listen(port, () => {
-  console.log(`সার্ভার চালু হয়েছে পোর্ট: ${port}`);
   startBot();
 });
