@@ -15,16 +15,17 @@ const chatHistories = new Map();
 const humanPausedChats = new Map();
 const debounceTimers = new Map();
 const messageQueues = new Map();
+const sentByBot = new Set(); // বটের নিজের পাঠানো মেসেজ চেনার মেমোরি
 let bossCustomRules = '';
 let currentPairingCode = '';
 
 const SYSTEM_INSTRUCTION = `
 তুমি একটি অনলাইন শপের অত্যন্ত দ্রুত, বিনয়ী ও চটপটে সেলস অ্যাসিস্ট্যান্ট।
-কঠোর নিয়ম:
-১. সবসময় ১-২ লাইনে মিষ্টি ও স্বাভাবিক বাংলায় দ্রুত উত্তর দেবে। কোনো আনুষ্ঠানিক ডায়লগ দেবে না।
-২. তোমার জানা তথ্য এবং বসের দেওয়া তথ্যের বাইরে কোনো মনগড়া বা আন্দাজে কথা বলবে না।
-৩. কাস্টমার যদি এমন কোনো পণ্যের দাম বা তথ্য জানতে চায় যা বসের নিয়মে নেই, তবে সরাসরি বলবে: "একটু অপেক্ষা করুন, আমি চেক করে জানাচ্ছি।" এবং উত্তরের শেষে অবশ্যই [HELP_NEEDED] লিখবে।
-৪. কাস্টমার অর্ডার করতে চাইলে শুধু নাম, ঠিকানা ও ১১ ডিজিটের নম্বর চেয়ে নেবে। সব তথ্য পাওয়ার পর বলবে: "ধন্যবাদ! আপনার অর্ডারটি গ্রহণ করা হয়েছে।" এবং শেষে [ORDER_COMPLETED] লিখবে।
+কঠোর নিয়মাবলী:
+১. সবসময় ১-২ লাইনে মিষ্টি ও স্বাভাবিক বাংলায় দ্রুত উত্তর দেবে। কোনো বাড়তি আনুষ্ঠানিক ডায়লগ দেবে না।
+২. বসের দেওয়া পণ্যের তথ্য ও ডেলিভারি চার্জ সঠিকভাবে বলবে।
+৩. কোনো তথ্য অজানা থাকলে বানিয়ে বলবে না, বলবে: "একটু অপেক্ষা করুন, আমি চেক করে জানাচ্ছি।" এবং উত্তরের শেষে লিখবে [HELP_NEEDED]।
+৪. কাস্টমার অর্ডার করতে চাইলে ফরমটি দেবে এবং সব তথ্য পেলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং শেষে লিখবে [ORDER_COMPLETED]।
 `;
 
 async function generateAIReply(jid, userText) {
@@ -36,28 +37,24 @@ async function generateAIReply(jid, userText) {
   const fullPrompt = `${SYSTEM_INSTRUCTION}\nবসের শেখানো পণ্যের তথ্য ও নিয়মাবলী:\n${bossCustomRules}`;
   const conversation = history.map(h => `${h.role === 'user' ? 'Customer' : 'Seller'}: ${h.text}`).join('\n');
 
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: conversation,
-      config: { systemInstruction: fullPrompt, temperature: 0.3 }
-    });
-    const reply = typeof response.text === 'function' ? response.text() : response.text;
-    if (reply) {
-      history.push({ role: 'model', text: reply.trim() });
-      chatHistories.set(jid, history);
-      return reply.trim();
-    }
-  } catch (e) {
+  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-latest'];
+
+  for (const model of candidateModels) {
     try {
-      const fallback = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+      const response = await ai.models.generateContent({
+        model: model,
         contents: conversation,
         config: { systemInstruction: fullPrompt, temperature: 0.3 }
       });
-      const fallbackText = typeof fallback.text === 'function' ? fallback.text() : fallback.text;
-      if (fallbackText) return fallbackText.trim();
-    } catch (err) {}
+      const reply = typeof response.text === 'function' ? response.text() : response.text;
+      if (reply) {
+        history.push({ role: 'model', text: reply.trim() });
+        chatHistories.set(jid, history);
+        return reply.trim();
+      }
+    } catch (e) {
+      console.log(`Model ${model} failed, trying next...`);
+    }
   }
   return null;
 }
@@ -71,6 +68,19 @@ async function startBot() {
     logger: pino({ level: 'silent' }),
     browser: ['Ubuntu', 'Chrome', '20.0.04']
   });
+
+  // সুরক্ষিত মেসেজ পাঠানোর ফাংশন (যাতে বট নিজেকে লক না করে)
+  async function safeSendMessage(targetJid, textContent) {
+    try {
+      const sent = await sock.sendMessage(targetJid, { text: textContent });
+      if (sent?.key?.id) {
+        sentByBot.add(sent.key.id);
+        setTimeout(() => sentByBot.delete(sent.key.id), 60000);
+      }
+    } catch (e) {
+      console.error('Send error:', e.message);
+    }
+  }
 
   if (!sock.authState.creds.registered) {
     setTimeout(async () => {
@@ -105,46 +115,48 @@ async function startBot() {
       const jid = msg.key.remoteJid;
       if (!jid || jid.endsWith('@g.us')) continue;
 
+      // বটের নিজের কোড থেকে পাঠানো মেসেজ হলে ইগনোর করবে (লক করবে না)
+      if (sentByBot.has(msg.key.id)) {
+        sentByBot.delete(msg.key.id);
+        continue;
+      }
+
+      // আপনি নিজে ফোন থেকে হাত দিয়ে কোনো কাস্টমারকে মেসেজ দিলে তবেই ৫ মিনিট মিউট হবে
+      if (msg.key.fromMe) {
+        humanPausedChats.set(jid, Date.now() + 5 * 60 * 1000);
+        continue;
+      }
+
       const userText = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
       if (!userText) continue;
 
       const cleanText = userText.trim();
 
-      // ==========================================
-      // ১. তাৎক্ষণিক বস ট্রেনিং (কোনো বিলম্ব ছাড়া ১ সেকেন্ডে শিখবে)
-      // ==========================================
+      // বস কমান্ড
       if (cleanText.startsWith('!শিখুন') || cleanText.startsWith('!learn')) {
-        ACTIVE_BOSS_JID = jid; // আপনার আইডি অটো সেভ করে নেবে
+        ACTIVE_BOSS_JID = jid;
         const newRule = cleanText.replace(/^(!শিখুন|!learn)\s*[:]?\s*/i, '').trim();
         if (newRule) {
           bossCustomRules += `\n- ${newRule}`;
-          await sock.sendMessage(jid, { 
-            text: `✅ বস, তথ্যটি সাথে সাথে মুখস্থ করে নিয়েছি!\n📌 "${newRule}"\nএখন থেকে কাস্টমার জানতে চাইলে ৩ সেকেন্ডে উত্তর দেব।` 
-          });
+          await safeSendMessage(jid, `✅ বস, তথ্যটি মুখস্থ করে নিয়েছি!\nএখন টেস্ট করে দেখুন, উত্তর দিচ্ছি।`);
         }
         continue;
       }
 
       if (cleanText === '!নিয়ম' || cleanText === '!rules') {
         ACTIVE_BOSS_JID = jid;
-        await sock.sendMessage(jid, { 
-          text: `📋 বর্তমানে মুখস্থ থাকা তথ্যাবলী:\n${bossCustomRules || 'এখনো কোনো তথ্য যোগ করা হয়নি।'}` 
-        });
+        await safeSendMessage(jid, `📋 সংরক্ষিত তথ্য:\n${bossCustomRules || 'কোনো তথ্য নেই।'}`);
         continue;
       }
 
-      // আপনি মেসেজ পাঠালে ৫ মিনিট মিউট
-      if (msg.key.fromMe) {
-        humanPausedChats.set(jid, Date.now() + 5 * 60 * 1000);
-        continue;
+      // বস যখন টেস্ট করছেন তখন ৫ মিনিটের পজ প্রযোজ্য হবে না
+      const isBossChat = (jid === ACTIVE_BOSS_JID || jid.includes('01789631882'));
+      if (!isBossChat) {
+        const pauseUntil = humanPausedChats.get(jid) || 0;
+        if (Date.now() < pauseUntil) continue;
       }
 
-      const pauseUntil = humanPausedChats.get(jid) || 0;
-      if (Date.now() < pauseUntil) continue;
-
-      // ==========================================
-      // ২. মাত্র ৮০০ms বাফার (৩-৫ সেকেন্ডে রিপ্লাই সম্পন্ন হবে)
-      // ==========================================
+      // দ্রুত মেসেজ কিউ
       let queue = messageQueues.get(jid) || [];
       queue.push(userText);
       messageQueues.set(jid, queue);
@@ -162,39 +174,28 @@ async function startBot() {
           let replyText = await generateAIReply(jid, fullMessage);
           if (!replyText) return;
 
-          // না বুঝলে বসকে অ্যালার্ট
           if (replyText.includes('[HELP_NEEDED]')) {
             replyText = replyText.replace('[HELP_NEEDED]', '').trim();
-            await sock.sendMessage(ACTIVE_BOSS_JID, {
-              text: `⚠️ *বস, কাস্টমারের সাহায্য প্রয়োজন!*\n💬 প্রশ্ন: "${fullMessage}"\n👉 আমি বলেছি চেক করে জানাচ্ছি, আপনি একটু ইনবক্সে দেখুন।`
-            });
+            await safeSendMessage(ACTIVE_BOSS_JID, `⚠️ *বস, সাহায্য দরকার!*\nপ্রশ্ন: "${fullMessage}"\nনম্বর: ${jid.replace('@s.whatsapp.net', '')}`);
           }
 
-          // অর্ডার অ্যালার্ট
           if (replyText.includes('[ORDER_COMPLETED]')) {
             replyText = replyText.replace('[ORDER_COMPLETED]', '').trim();
-            await sock.sendMessage(ACTIVE_BOSS_JID, {
-              text: `📦 *নতুন অর্ডার এসেছে!*\n💬 তথ্য: ${fullMessage}`
-            });
+            await safeSendMessage(ACTIVE_BOSS_JID, `📦 *নতুন অর্ডার!*\nতথ্য: ${fullMessage}`);
           }
 
-          await sock.sendMessage(jid, { text: replyText });
+          await safeSendMessage(jid, replyText);
         } catch (err) {
-          console.error('Error:', err.message);
+          console.error('Processing error:', err.message);
         }
-      }, 800));
+      }, 700));
     }
   });
 }
 
 app.get('/', (req, res) => {
   if (currentPairingCode) {
-    res.send(`
-      <div style="text-align:center;margin-top:60px;font-family:sans-serif;">
-        <h2>WhatsApp পেয়ারিং কোড:</h2>
-        <h1 style="font-size:45px;color:#16a34a;letter-spacing:6px;">${currentPairingCode}</h1>
-      </div>
-    `);
+    res.send(`<div style="text-align:center;margin-top:60px;"><h2>Pairing Code:</h2><h1>${currentPairingCode}</h1></div>`);
   } else {
     res.send('<h2 style="text-align:center;color:green;margin-top:60px;">বট সক্রিয় রয়েছে!</h2>');
   }
