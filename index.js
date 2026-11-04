@@ -1,8 +1,7 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 const pino = require('pino');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -10,98 +9,71 @@ const port = process.env.PORT || 3000;
 const BOT_PHONE_NUMBER = '8801739241206';
 const BOSS_PHONE_NUMBER = '8801789631882';
 
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
 let currentPairingCode = '';
-const conversationMemory = new Map();
+const chatHistory = new Map();
+const lastAlertSentTime = new Map(); // অযথা বারবার অ্যালার্ট পাঠানো বন্ধ রাখার জন্য
 
-function getStoreData() {
-  try {
-    const filePath = path.join(__dirname, 'knowledge.json');
-    if (fs.existsSync(filePath)) {
-      return fs.readFileSync(filePath, 'utf8');
-    }
-  } catch (e) {
-    console.error('File read error:', e.message);
-  }
-  return `
-  প্রোডাক্ট:
-  - সাকুরা মাড মাস্ক: ২৪০ টাকা (১ প্যাকেটে ১২ পিস)
-  - শিট মাস্ক: ৬০ টাকা
-  - রাইস ফেস ওয়াশ: ৮৫০ টাকা
-  ডেলিভারি চার্জ:
-  - ব্রাহ্মণবাড়িয়ার ভিতরে: ৭০ টাকা
-  - ব্রাহ্মণবাড়িয়ার বাইরে: ১২০ টাকা
-  `;
-}
+const STORE_SYSTEM_PROMPT = `
+তুমি RS SHOP BD-এর একজন অত্যন্ত বিনয়ী, বাস্তবমুখী ও চটপটে সেলস অ্যাসিস্ট্যান্ট।
+কাস্টমার যেভাবে মেসেজ দেবে (বাংলা বা বাংলিশ), তুমি অত্যন্ত স্বাভাবিক, মার্জিত ও মিষ্টি বাংলায় ১-২ লাইনে উত্তর দেবে। কোনো রোবটের মতো একই কথা বারবার আওড়াবে না।
 
-async function callGemini(jid, userText) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  const storeInfo = getStoreData();
+আমাদের শপের পণ্য তালিকা:
+- সাকুরা মাড মাস্ক (Sakura Mud Mask): ১ প্যাকেট ২৪০ টাকা (১২ পিস থাকে)।
+- শিট মাস্ক (Sheet Mask): প্রতি পিস ৬০ টাকা।
+- রাইস ফেস ওয়াশ: ৮৫০ টাকা।
+- ডেলিভারি চার্জ: ব্রাহ্মণবাড়িয়ার ভিতরে ৭০ টাকা, ব্রাহ্মণবাড়িয়ার বাইরে ১২০ টাকা। সময় ২-৩ দিন।
 
-  if (apiKey) {
-    let history = conversationMemory.get(jid) || [];
-    history.push({ role: 'user', parts: [{ text: userText }] });
-    if (history.length > 8) history = history.slice(-8);
-
-    const systemPrompt = `
-তুমি একটি অনলাইন শপের অত্যন্ত আন্তরিক, দক্ষ ও বাস্তবমুখী সেলস অ্যাসিস্ট্যান্ট।
 কঠোর নিয়মাবলী:
-১. কাস্টমার বাংলা বা বাংলিশে যাই লিখুক, সবসময় প্রফেশনাল ও মিষ্টি বাংলায় ১-২ লাইনে উত্তর দেবে।
-২. আমাদের বর্তমান প্রোডাক্ট ও রেট:
-${storeInfo}
-৩. কাস্টমার যদি এমন কোনো পণ্যের কথা বলে যা আমাদের তালিকায় নেই বা অন্য কোনো প্রোডাক্টের ছবি/নাম দেয়, কখনোই "আমাদের কাছে শুধু অমুক অমুক প্রোডাক্ট আছে" বা "দুঃখিত আমাদের কাছে নেই" বলবে না। সরাসরি বলবে:
-"আপনার কোন প্রোডাক্টটি লাগবে? দয়া করে প্রোডাক্টের নাম অথবা একটি ছবি দিন, আমি চেক করে জানাচ্ছি।"
-এবং উত্তরের শেষে লিখবে [NEED_BOSS_HELP]।
-৪. কাস্টমার অর্ডার করতে চাইলে এই ফর্মটি পূরণ করতে বলবে:
+১. কাস্টমার সালাম, হাই বা স্বাভাবিক কথা বললে আন্তরিকভাবে উত্তর দিয়ে জানতে চাইবে কী সাহায্য করতে পারো।
+২. কাস্টমার যদি এমন কোনো পণ্যের কথা বলে যা আমাদের তালিকায় নেই (যেমন: পাপায়া ফেসওয়াশ, সানস্ক্রিন বা অন্য প্রসাধন) অথবা ডেলিভারি ট্র্যাকিং ইত্যাদি নিয়ে কোনো জটিল প্রশ্ন করে যা তোমার জানা নেই:
+   - কখনোই "স্টকে নেই" বা "আমাদের কাছে নেই" বলবে না।
+   - কাস্টমারকে স্বাভাবিকভাবে বলবে: "জি, একটু অপেক্ষা করুন, আমি আমাদের শপ ওনারের সাথে কথা বলে আপনাকে বিস্তারিত জানাচ্ছি।"
+   - এবং এই ধরণের অজানা প্রশ্নের ক্ষেত্রে উত্তরের শেষে [ASK_BOSS] ট্যাগটি গোপনে লিখে দেবে।
+৩. কাস্টমার অর্ডার করতে চাইলে শুধু এই ফর্মটি পূরণ করতে বলবে:
 নাম : 
 জেলা : 
 থানা : 
 গ্রাম বা রোড নং : 
 মোবাইল নাম্বার : 
 কি প্রডাক্ট নিতে চাচ্ছেন :
-৫. সব তথ্য পেয়ে গেলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং শেষে [ORDER_DONE] লিখবে।
+৪. অর্ডার ফর্ম পূরণ করে দিলে বলবে: "ধন্যবাদ! আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পেয়ে যাবেন।" এবং উত্তরের শেষে গোপনে [ORDER_DONE] লিখে দেবে।
 `;
 
-    const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+async function getAIReply(jid, userText) {
+  let history = chatHistory.get(jid) || [];
+  history.push({ role: 'user', parts: [{ text: userText }] });
+  if (history.length > 6) history = history.slice(-6);
 
-    for (const model of models) {
-      try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            system_instruction: { parts: [{ text: systemPrompt }] },
-            contents: history,
-            generationConfig: { temperature: 0.3 }
-          })
-        });
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: history,
+      config: {
+        systemInstruction: STORE_SYSTEM_PROMPT,
+        temperature: 0.3
+      }
+    });
 
-        const data = await response.json();
-        if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-          const reply = data.candidates[0].content.parts[0].text.trim();
-          history.push({ role: 'model', parts: [{ text: reply.replace(/\[ORDER_DONE\]|\[NEED_BOSS_HELP\]/g, '').trim() }] });
-          conversationMemory.set(jid, history);
-          return reply;
-        }
-      } catch (err) {}
+    const reply = typeof response.text === 'function' ? response.text() : response.text;
+    if (reply && reply.trim()) {
+      const cleanReply = reply.trim();
+      // মেমোরিতে ট্যাগ ছাড়া ফ্রেশ উত্তর সেভ করা
+      const replyWithoutTags = cleanReply.replace(/\[ORDER_DONE\]|\[ASK_BOSS\]/g, '').trim();
+      history.push({ role: 'model', parts: [{ text: replyWithoutTags }] });
+      chatHistory.set(jid, history);
+      return cleanReply;
     }
+  } catch (err) {
+    console.error('Gemini API Error:', err.message);
   }
 
-  // ফেইল-সেফ ব্যাকআপ লজিক
-  const lower = userText.toLowerCase();
-  if (lower.includes('sakura') || lower.includes('সাকুরা') || lower.includes('mud')) {
-    return 'সাকুরা মাড মাস্ক ১ প্যাকেট ২৪০ টাকা (১২ পিস থাকে)। ব্রাহ্মণবাড়িয়ার ভেতর ডেলিভারি ৭০ টাকা, বাইরে ১২০ টাকা।';
+  // ইমার্জেন্সি ফলব্যাক
+  if (userText.toLowerCase().includes('order') || userText.includes('অর্ডার')) {
+    return "অর্ডার করতে নিচের তথ্যগুলো লিখে পাঠান:\n\nনাম :\nজেলা :\nথানা :\nগ্রাম বা রোড নং :\nমোবাইল নাম্বার :\nকি প্রডাক্ট নিতে চাচ্ছেন :";
   }
-  if (lower.includes('sheet') || lower.includes('শিট') || lower.includes('সিট')) {
-    return 'শিট মাস্ক প্রতি পিস ৬০ টাকা। ব্রাহ্মণবাড়িয়ার ভেতর ডেলিভারি ৭০ টাকা, বাইরে ১২০ টাকা।';
-  }
-  if (lower.includes('rice') || lower.includes('রাইস') || lower.includes('face wash')) {
-    return 'রাইস ফেস ওয়াশ এর দাম ৮৫০ টাকা। ডেলিভারি চার্জ ব্রাহ্মণবাড়িয়ায় ৭০ টাকা, বাইরে ১২০ টাকা।';
-  }
-  if (lower.includes('order') || lower.includes('অর্ডার') || lower.includes('nibo') || lower.includes('নিব')) {
-    return "অর্ডার কনফার্ম করতে নিচের তথ্যগুলো লিখে পাঠান:\n\nনাম :\nজেলা :\nথানা :\nগ্রাম বা রোড নং :\nমোবাইল নাম্বার :\nকি প্রডাক্ট নিতে চাচ্ছেন :";
-  }
-
-  return 'আপনার কোন প্রোডাক্টটি লাগবে? দয়া করে প্রোডাক্টের নাম অথবা একটি ছবি দিন, আমি চেক করে জানাচ্ছি। [NEED_BOSS_HELP]';
+  return "জি, বলুন কীভাবে সাহায্য করতে পারি? কোন প্রোডাক্টটি নিতে চাচ্ছেন জানাবেন?";
 }
 
 async function startBot() {
@@ -120,11 +92,11 @@ async function startBot() {
         let code = await sock.requestPairingCode(BOT_PHONE_NUMBER);
         code = code?.match(/.{1,4}/g)?.join('-') || code;
         currentPairingCode = code;
-        console.log(`NEW_PAIRING_CODE: ${currentPairingCode}`);
+        console.log(`Pairing Code: ${currentPairingCode}`);
       } catch (err) {
         console.error('Pairing Error:', err.message);
       }
-    }, 5000);
+    }, 4000);
   }
 
   sock.ev.on('creds.update', saveCreds);
@@ -151,27 +123,35 @@ async function startBot() {
       if (!userText) continue;
 
       const cleanText = userText.trim();
+      const customerNumber = jid.replace(/@.+/, '');
 
       try {
-        let aiReply = await callGemini(jid, cleanText);
+        let aiReply = await getAIReply(jid, cleanText);
         if (!aiReply) continue;
 
-        // নতুন প্রোডাক্ট বা হেল্প দরকার হলে বসকে মেসেজ পাঠানো
-        if (aiReply.includes('[NEED_BOSS_HELP]')) {
-          aiReply = aiReply.replace('[NEED_BOSS_HELP]', '').trim();
-          await sock.sendMessage(`${BOSS_PHONE_NUMBER}@s.whatsapp.net`, {
-            text: `⚠️ *কাস্টমারের অন্য প্রোডাক্টের অনুসন্ধান!*\nকাস্টমার: ${jid.replace(/@.+/, '')}\nমেসেজ: "${cleanText}"`
-          });
+        // অজানা কোনো তথ্য বা প্রোডাক্ট চাইলে বসকে অ্যালার্ট পাঠানো (প্রতি ৫ মিনিটে সর্বোচ্চ ১ বার)
+        if (aiReply.includes('[ASK_BOSS]')) {
+          aiReply = aiReply.replace('[ASK_BOSS]', '').trim();
+          const now = Date.now();
+          const lastAlert = lastAlertSentTime.get(jid) || 0;
+
+          if (now - lastAlert > 300000) { // ৫ মিনিটের মধ্যে দ্বিতীয়বার অ্যালার্ট দিয়ে বিরক্ত করবে না
+            lastAlertSentTime.set(jid, now);
+            await sock.sendMessage(`${BOSS_PHONE_NUMBER}@s.whatsapp.net`, {
+              text: `⚠️ *কাস্টমারের নতুন তথ্য/পণ্য অনুসন্ধান!*\nকাস্টমার নম্বর: ${customerNumber}\nমেসেজ: "${cleanText}"\n(কাস্টমারকে বলা হয়েছে আপনি চেক করে জানাবেন)`
+            });
+          }
         }
 
-        // অর্ডার কনফার্ম হলে বসকে অ্যালার্ট
+        // অর্ডার কনফার্ম হলে সাথে সাথে বসকে অর্ডার তথ্য পাঠানো
         if (aiReply.includes('[ORDER_DONE]')) {
           aiReply = aiReply.replace('[ORDER_DONE]', '').trim();
           await sock.sendMessage(`${BOSS_PHONE_NUMBER}@s.whatsapp.net`, {
-            text: `📦 *নতুন অর্ডার এসেছে!*\nকাস্টমার: ${jid.replace(/@.+/, '')}\nমেসেজ: ${cleanText}`
+            text: `📦 *নতুন নিশ্চিত অর্ডার এসেছে!*\nকাস্টমার: ${customerNumber}\nঅর্ডারের বিবরণ:\n${cleanText}`
           });
         }
 
+        // কাস্টমারকে উত্তর পাঠানো
         await sock.sendMessage(jid, { text: aiReply });
       } catch (e) {
         console.error('Send Error:', e.message);
