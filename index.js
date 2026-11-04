@@ -6,53 +6,70 @@ const pino = require('pino');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ফোন নম্বরসমূহ
 const BOT_PHONE_NUMBER = '8801739241206';
-const BOSS_JID = '8801789631882@s.whatsapp.net';
+const BOSS_PHONE_NUMBER = '8801789631882';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 let currentPairingCode = '';
-let customLearnedRules = '';
-
-// শপের স্থায়ী তথ্য ও নির্দেশাবলী
-const STORE_RULES = `
-তুমি একটি অনলাইন শপের অত্যন্ত দক্ষ, বিনয়ী ও দ্রুতগতির সেলস এজেন্ট।
-
-আমাদের শপের স্থায়ী পণ্যের তথ্য ও নিয়ম:
-১. প্রোডাক্ট: সাকুরা মাড মাস্ক (Sakura Mud Mask)।
-২. দাম: ১ প্যাকেট ২৪০ টাকা (প্রতি প্যাকেটে ১২ পিস থাকে)।
-৩. ডেলিভারি চার্জ: ব্রাহ্মণবাড়িয়ার ভেতরে ৭০ টাকা, ব্রাহ্মণবাড়িয়ার বাইরে ১২০ টাকা।
-৪. কাস্টমার যদি বাংলিশে লেখে (যেমন: "price koto", "dam koto", "sakura mask nibo") অথবা বাংলায় লেখে, সবসময় সুন্দর ও প্রফেশনাল বাংলায় উত্তর দেবে। কথা বেশি বড় করবে না, ১-২ লাইনে ক্লিয়ার উত্তর দেবে।
-৫. কাস্টমার যদি অর্ডার করতে চায়, তাকে এই ফর্মটি পূরণ করে দিতে বলবে:
-   নাম : 
-   জেলা : 
-   থানা : 
-   গ্রাম বা রোড নং : 
-   মোবাইল নাম্বার : 
-   কি প্রডাক্ট নিতে চাচ্ছেন : 
-৬. কাস্টমার এই তথ্যগুলো লিখে দিলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং মেসেজের একেবারে শেষে লিখবে [ORDER_COMPLETED]।
-৭. এই পণ্যের বাইরে অন্য কোনো পণ্যের তথ্য কাস্টমার জানতে চাইলে বানিয়ে বলবে না, বলবে: "একটু অপেক্ষা করুন, আমি চেক করে জানাচ্ছি।" এবং মেসেজের শেষে লিখবে [NEED_BOSS_HELP]।
+let customLearnedRules = `
+- শিট মাস্ক (Sheet Mask) এর দাম ৬০ টাকা।
 `;
 
-// AI রিপ্লাই তৈরি
-async function getAIReply(userMessage) {
-  const fullPrompt = `${STORE_RULES}\nবসের অতিরিক্ত নিয়ম:\n${customLearnedRules}`;
+// কাস্টমারের সাথে কথা মনে রাখার ক্যাশ
+const conversationMemory = new Map();
+
+const STORE_SYSTEM_PROMPT = `
+তুমি একটি অনলাইন শপের অত্যন্ত বিনয়ী, চটপটে ও বাস্তবমুখী সেলস অ্যাসিস্ট্যান্ট।
+কঠোর নিয়মাবলী:
+১. কাস্টমার বাংলায় লিখুক বা বাংলিশে (যেমন: "sheet mask koto", "dam koto", "ji", "onno kisu chai"), তুমি সবসময় অত্যন্ত আন্তরিক ও স্বাভাবিক বাংলায় ১-২ লাইনে উত্তর দেবে। কোনো বড় আনুষ্ঠানিক স্বাগতম বক্তব্য বারবার দেবে না।
+২. বর্তমান পণ্যের তালিকা ও দাম:
+   - সাকুরা মাড মাস্ক (Sakura Mud Mask): ১ প্যাকেট ২৪০ টাকা (১২ পিস থাকে)।
+   - শিট মাস্ক: ৬০ টাকা।
+৩. ডেলিভারি চার্জ:
+   - ব্রাহ্মণবাড়িয়ার ভিতরে: ৭০ টাকা।
+   - ব্রাহ্মণবাড়িয়ার বাইরে: ১২০ টাকা।
+৪. কাস্টমার যদি বলে "অন্য কিছু চাই" বা এমন কোনো পণ্যের কথা বলে যা আমাদের তালিকায় নেই, সরাসরি বলবে: "দুঃখিত, বর্তমানে আমাদের কাছে শুধু সাকুরা মাড মাস্ক এবং শিট মাস্ক রয়েছে। আপনি কি এগুলোর কোনোটি নিতে চান?"
+৫. কাস্টমার কোনো পণ্য কনফার্ম করতে চাইলে এই ফর্মটি পূরণ করতে বলবে:
+   নাম:
+   জেলা:
+   থানা:
+   গ্রাম বা রোড নং:
+   মোবাইল নাম্বার:
+   প্রোডাক্টের নাম:
+৬. তথ্যগুলো দিলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং মেসেজের শেষে [ORDER_DONE] লিখবে।
+`;
+
+async function getAIReply(jid, userMessage) {
+  let history = conversationMemory.get(jid) || [];
+  history.push(`Customer: ${userMessage}`);
+  if (history.length > 6) history = history.slice(-6);
+  conversationMemory.set(jid, history);
+
+  const fullPrompt = `${STORE_SYSTEM_PROMPT}\nবসের অতিরিক্ত নতুন তথ্য:\n${customLearnedRules}`;
+  const promptContents = `${history.join('\n')}\nSeller:`;
+
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: userMessage,
+      contents: promptContents,
       config: {
         systemInstruction: fullPrompt,
         temperature: 0.3
       }
     });
+
     const reply = typeof response.text === 'function' ? response.text() : response.text;
-    return reply ? reply.trim() : null;
-  } catch (error) {
-    console.error('Gemini API Error:', error.message);
-    return null;
+    if (reply) {
+      const cleanReply = reply.trim();
+      history.push(`Seller: ${cleanReply.replace('[ORDER_DONE]', '').trim()}`);
+      conversationMemory.set(jid, history);
+      return cleanReply;
+    }
+  } catch (err) {
+    console.error('Gemini API Error:', err.message);
   }
+  return 'একটু অপেক্ষা করুন, নেটওয়ার্কের কারণে মেসেজটি দেখতে দেরি হয়েছে। আপনি কি কোনো অর্ডার করতে চান?';
 }
 
 async function startBot() {
@@ -65,7 +82,6 @@ async function startBot() {
     browser: ['Ubuntu', 'Chrome', '20.0.04']
   });
 
-  // পেয়ারিং কোড তৈরি (যদি লগইন করা না থাকে)
   if (!sock.authState.creds.registered) {
     setTimeout(async () => {
       try {
@@ -97,8 +113,6 @@ async function startBot() {
 
     for (const msg of messages) {
       const jid = msg.key.remoteJid;
-
-      // গ্রুপ মেসেজ এবং বটের নিজের মেসেজ ইগনোর করা
       if (!jid || jid.endsWith('@g.us') || msg.key.fromMe) continue;
 
       const userText = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
@@ -106,64 +120,51 @@ async function startBot() {
 
       const cleanText = userText.trim();
 
-      // বস কমান্ড হ্যান্ডলিং (আপনার 01789631882 নম্বর থেকে)
-      const isBoss = jid.includes('01789631882') || jid === BOSS_JID;
-      if (isBoss && (cleanText.startsWith('!শিখুন') || cleanText.startsWith('!learn'))) {
+      // বস কমান্ড হ্যান্ডলিং (যেকোনো ফরম্যাটেই বসকে চিনবে)
+      if (cleanText.startsWith('!শিখুন') || cleanText.startsWith('!learn')) {
         const newInstruction = cleanText.replace(/^(!শিখুন|!learn)\s*[:]?\s*/i, '').trim();
         if (newInstruction) {
           customLearnedRules += `\n- ${newInstruction}`;
-          await sock.sendMessage(jid, { text: `✅ বস, নতুন নিয়ম যোগ করেছি:\n"${newInstruction}"` });
+          await sock.sendMessage(jid, { text: `✅ বস, নতুন তথ্য যুক্ত হয়েছে:\n"${newInstruction}"` });
         }
         continue;
       }
 
-      if (isBoss && (cleanText === '!নিয়ম' || cleanText === '!rules')) {
-        await sock.sendMessage(jid, { text: `📋 বর্তমান সংরক্ষিত নিয়মাবলী:\n${customLearnedRules || 'এখনো নতুন কোনো নিয়ম দেননি।'}` });
+      if (cleanText === '!নিয়ম' || cleanText === '!rules') {
+        await sock.sendMessage(jid, { text: `📋 বর্তমান নিয়মাবলী:\n${customLearnedRules}` });
         continue;
       }
 
-      // সাধারণ কাস্টমার ও মেসেজ প্রসেসিং
+      // এআই রিপ্লাই পাঠানো
       try {
-        let aiReply = await getAIReply(cleanText);
+        let aiReply = await getAIReply(jid, cleanText);
         if (!aiReply) continue;
 
-        // অর্ডার কমপ্লিট অ্যালার্ট বসকে পাঠানো
-        if (aiReply.includes('[ORDER_COMPLETED]')) {
-          aiReply = aiReply.replace('[ORDER_COMPLETED]', '').trim();
-          await sock.sendMessage(BOSS_JID, {
-            text: `📦 *নতুন অর্ডার অ্যালার্ট!*\nকাস্টমার: ${jid.replace('@s.whatsapp.net', '')}\nঅর্ডার মেসেজ: ${cleanText}`
+        if (aiReply.includes('[ORDER_DONE]')) {
+          aiReply = aiReply.replace('[ORDER_DONE]', '').trim();
+          await sock.sendMessage(`${BOSS_PHONE_NUMBER}@s.whatsapp.net`, {
+            text: `📦 *নতুন অর্ডার এসেছে!*\nকাস্টমার: ${jid.replace(/@.+/, '')}\nমেসেজ: ${cleanText}`
           });
         }
 
-        // না জানা তথ্যের অ্যালার্ট বসকে পাঠানো
-        if (aiReply.includes('[NEED_BOSS_HELP]')) {
-          aiReply = aiReply.replace('[NEED_BOSS_HELP]', '').trim();
-          await sock.sendMessage(BOSS_JID, {
-            text: `⚠️ *সাহায্য প্রয়োজন!*\nকাস্টমার জানতে চেয়েছে: "${cleanText}"\nনম্বর: ${jid.replace('@s.whatsapp.net', '')}`
-          });
-        }
-
-        // কাস্টমারকে উত্তর পাঠানো
         await sock.sendMessage(jid, { text: aiReply });
-      } catch (err) {
-        console.error('Message reply error:', err.message);
+      } catch (e) {
+        console.error('Reply send error:', e.message);
       }
     }
   });
 }
 
-// ওয়েব সার্ভার পেজ (পেয়ারিং কোড দেখানোর জন্য)
 app.get('/', (req, res) => {
   if (currentPairingCode) {
     res.send(`
       <div style="text-align:center;margin-top:60px;font-family:sans-serif;">
         <h2>WhatsApp পেয়ারিং কোড:</h2>
         <h1 style="font-size:45px;color:#16a34a;letter-spacing:6px;background:#f3f4f6;display:inline-block;padding:10px 25px;border-radius:10px;">${currentPairingCode}</h1>
-        <p style="color:#555;margin-top:15px;">WhatsApp-এ Link with phone number দিয়ে কোডটি বসান।</p>
       </div>
     `);
   } else {
-    res.send('<h2 style="text-align:center;color:green;margin-top:60px;font-family:sans-serif;">✅ বট সফলভাবে সক্রিয় রয়েছে!</h2>');
+    res.send('<h2 style="text-align:center;color:green;margin-top:60px;">✅ বট সফলভাবে সক্রিয় রয়েছে!</h2>');
   }
 });
 
