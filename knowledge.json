@@ -1,0 +1,31 @@
+{
+  "shop_info": {
+    "name": "RS SHOP BD",
+    "delivery_charge": {
+      "inside_brahmanbaria": 70,
+      "outside_brahmanbaria": 120
+    },
+    "delivery_time": "২-৩ দিন"
+  },
+  "products": [
+    {
+      "name": "সাকুরা মাড মাস্ক (Sakura Mud Mask)",
+      "price": 240,
+      "unit": "১ প্যাকেট (১২ পিস)",
+      "keywords": ["sakura", "mud mask", "সাকুরা", "মাড মাস্ক"]
+    },
+    {
+      "name": "শিট মাস্ক (Sheet Mask)",
+      "price": 60,
+      "unit": "১ পিস",
+      "keywords": ["sheet mask", "সিট মাস্ক", "শিট মাস্ক"]
+    },
+    {
+      "name": "রাইস ফেস ওয়াশ (Rice Face Wash)",
+      "price": 850,
+      "unit": "১ পিস",
+      "keywords": ["rice", "face wash", "রাইস", "ফেস ওয়াশ"]
+    }
+  ],
+  "order_form": "অর্ডার কনফার্ম করতে নিচের তথ্যগুলো লিখে পাঠান:\n\nনাম :\nজেলা :\nথানা :\nগ্রাম বা রোড নং :\nমোবাইল নাম্বার :\nকি প্রডাক্ট নিতে চাচ্ছেন :"
+}
