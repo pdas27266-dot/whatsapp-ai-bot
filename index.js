@@ -2,6 +2,8 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const { GoogleGenAI } = require('@google/genai');
 const express = require('express');
 const pino = require('pino');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -12,64 +14,68 @@ const BOSS_PHONE_NUMBER = '8801789631882';
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 let currentPairingCode = '';
-let customLearnedRules = `
-- শিট মাস্ক (Sheet Mask) এর দাম ৬০ টাকা।
-`;
-
-// কাস্টমারের সাথে কথা মনে রাখার ক্যাশ
 const conversationMemory = new Map();
 
-const STORE_SYSTEM_PROMPT = `
-তুমি একটি অনলাইন শপের অত্যন্ত বিনয়ী, চটপটে ও বাস্তবমুখী সেলস অ্যাসিস্ট্যান্ট।
-কঠোর নিয়মাবলী:
-১. কাস্টমার বাংলায় লিখুক বা বাংলিশে (যেমন: "sheet mask koto", "dam koto", "ji", "onno kisu chai"), তুমি সবসময় অত্যন্ত আন্তরিক ও স্বাভাবিক বাংলায় ১-২ লাইনে উত্তর দেবে। কোনো বড় আনুষ্ঠানিক স্বাগতম বক্তব্য বারবার দেবে না।
-২. বর্তমান পণ্যের তালিকা ও দাম:
-   - সাকুরা মাড মাস্ক (Sakura Mud Mask): ১ প্যাকেট ২৪০ টাকা (১২ পিস থাকে)।
-   - শিট মাস্ক: ৬০ টাকা।
-৩. ডেলিভারি চার্জ:
-   - ব্রাহ্মণবাড়িয়ার ভিতরে: ৭০ টাকা।
-   - ব্রাহ্মণবাড়িয়ার বাইরে: ১২০ টাকা।
-৪. কাস্টমার যদি বলে "অন্য কিছু চাই" বা এমন কোনো পণ্যের কথা বলে যা আমাদের তালিকায় নেই, সরাসরি বলবে: "দুঃখিত, বর্তমানে আমাদের কাছে শুধু সাকুরা মাড মাস্ক এবং শিট মাস্ক রয়েছে। আপনি কি এগুলোর কোনোটি নিতে চান?"
-৫. কাস্টমার কোনো পণ্য কনফার্ম করতে চাইলে এই ফর্মটি পূরণ করতে বলবে:
-   নাম:
-   জেলা:
-   থানা:
-   গ্রাম বা রোড নং:
-   মোবাইল নাম্বার:
-   প্রোডাক্টের নাম:
-৬. তথ্যগুলো দিলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং মেসেজের শেষে [ORDER_DONE] লিখবে।
-`;
+// knowledge.json ফাইল থেকে ডেটা লোড করার ফাংশন
+function loadKnowledgeBase() {
+  try {
+    const filePath = path.join(__dirname, 'knowledge.json');
+    if (fs.existsSync(filePath)) {
+      const data = fs.readFileSync(filePath, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error('knowledge.json পড়তে সমস্যা হয়েছে:', err.message);
+  }
+  return null;
+}
 
 async function getAIReply(jid, userMessage) {
-  let history = conversationMemory.get(jid) || [];
-  history.push(`Customer: ${userMessage}`);
-  if (history.length > 6) history = history.slice(-6);
-  conversationMemory.set(jid, history);
+  const kb = loadKnowledgeBase();
+  const kbText = kb ? JSON.stringify(kb, null, 2) : 'কোনো তথ্য নেই';
 
-  const fullPrompt = `${STORE_SYSTEM_PROMPT}\nবসের অতিরিক্ত নতুন তথ্য:\n${customLearnedRules}`;
-  const promptContents = `${history.join('\n')}\nSeller:`;
+  const systemInstruction = `
+তুমি একটি অনলাইন শপের অত্যন্ত দক্ষ, বিনীত ও চটপটে সেলস অ্যাসিস্ট্যান্ট।
+কঠোর নিয়মাবলী:
+১. নিচে দেওয়া Knowledge Base-এর ওপর ভিত্তি করে উত্তর দেবে। কাস্টমার বাংলিশে লিখুক বা বাংলায়, তুমি সবসময় স্বাভাবিক, সুন্দর বাংলায় ১-২ লাইনে উত্তর দেবে।
+২. পণ্যের দাম, ডেলিভারি চার্জ বা অন্য কোনো তথ্য Knowledge Base-এর বাইরে বানিয়ে বলবে না।
+৩. কাস্টমার যদি এমন কোনো পণ্য চায় যা Knowledge Base-এ নেই, বলবে: "দুঃখিত, বর্তমানে এই পণ্যটি আমাদের স্টকে নেই।"
+৪. কাস্টমার অর্ডার করতে চাইলে Knowledge Base-এ থাকা order_form টি দেবে।
+৫. কাস্টমার সম্পূর্ণ তথ্য দিলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং বার্তার শেষে [ORDER_DONE] লিখবে।
+
+=== Knowledge Base ===
+${kbText}
+`;
+
+  let history = conversationMemory.get(jid) || [];
+  history.push({ role: 'user', parts: [{ text: userMessage }] });
+  if (history.length > 8) history = history.slice(-8);
 
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: promptContents,
+      contents: history,
       config: {
-        systemInstruction: fullPrompt,
-        temperature: 0.3
+        systemInstruction: systemInstruction,
+        temperature: 0.2
       }
     });
 
     const reply = typeof response.text === 'function' ? response.text() : response.text;
-    if (reply) {
+    if (reply && reply.trim()) {
       const cleanReply = reply.trim();
-      history.push(`Seller: ${cleanReply.replace('[ORDER_DONE]', '').trim()}`);
+      history.push({ role: 'model', parts: [{ text: cleanReply.replace('[ORDER_DONE]', '').trim() }] });
       conversationMemory.set(jid, history);
       return cleanReply;
     }
   } catch (err) {
-    console.error('Gemini API Error:', err.message);
+    console.error('API Error:', err.message);
   }
-  return 'একটু অপেক্ষা করুন, নেটওয়ার্কের কারণে মেসেজটি দেখতে দেরি হয়েছে। আপনি কি কোনো অর্ডার করতে চান?';
+
+  if (userMessage.includes('অর্ডার') || userMessage.toLowerCase().includes('order')) {
+    return kb?.order_form || 'অর্ডার করতে আপনার নাম, ঠিকানা ও মোবাইল নম্বর দিন।';
+  }
+  return 'জি, বলুন কীভাবে সাহায্য করতে পারি? কোন প্রোডাক্টটি নিতে চাচ্ছেন?';
 }
 
 async function startBot() {
@@ -120,22 +126,6 @@ async function startBot() {
 
       const cleanText = userText.trim();
 
-      // বস কমান্ড হ্যান্ডলিং (যেকোনো ফরম্যাটেই বসকে চিনবে)
-      if (cleanText.startsWith('!শিখুন') || cleanText.startsWith('!learn')) {
-        const newInstruction = cleanText.replace(/^(!শিখুন|!learn)\s*[:]?\s*/i, '').trim();
-        if (newInstruction) {
-          customLearnedRules += `\n- ${newInstruction}`;
-          await sock.sendMessage(jid, { text: `✅ বস, নতুন তথ্য যুক্ত হয়েছে:\n"${newInstruction}"` });
-        }
-        continue;
-      }
-
-      if (cleanText === '!নিয়ম' || cleanText === '!rules') {
-        await sock.sendMessage(jid, { text: `📋 বর্তমান নিয়মাবলী:\n${customLearnedRules}` });
-        continue;
-      }
-
-      // এআই রিপ্লাই পাঠানো
       try {
         let aiReply = await getAIReply(jid, cleanText);
         if (!aiReply) continue;
@@ -149,7 +139,7 @@ async function startBot() {
 
         await sock.sendMessage(jid, { text: aiReply });
       } catch (e) {
-        console.error('Reply send error:', e.message);
+        console.error('Send error:', e.message);
       }
     }
   });
