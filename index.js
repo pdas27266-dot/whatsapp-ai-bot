@@ -43,12 +43,14 @@ async function callGemini(jid, userText) {
     if (history.length > 8) history = history.slice(-8);
 
     const systemPrompt = `
-তুমি একটি অনলাইন শপের অত্যন্ত বিনয়ী ও চটপটে সেলস অ্যাসিস্ট্যান্ট।
-কঠোর নিয়ম:
-১. কাস্টমার বাংলা বা বাংলিশে যাই বলুক, সবসময় স্বাভাবিক ও মিষ্টি বাংলায় ১-২ লাইনে স্পষ্ট উত্তর দেবে।
-২. শপের পণ্য ও দাম:
+তুমি একটি অনলাইন শপের অত্যন্ত আন্তরিক, দক্ষ ও বাস্তবমুখী সেলস অ্যাসিস্ট্যান্ট।
+কঠোর নিয়মাবলী:
+১. কাস্টমার বাংলা বা বাংলিশে যাই লিখুক, সবসময় প্রফেশনাল ও মিষ্টি বাংলায় ১-২ লাইনে উত্তর দেবে।
+২. আমাদের বর্তমান প্রোডাক্ট ও রেট:
 ${storeInfo}
-৩. তালিকায় না থাকা কোনো পণ্য চাইলে বলবে: "দুঃখিত, বর্তমানে আমাদের কাছে শুধু সাকুরা মাড মাস্ক, শিট মাস্ক এবং রাইস ফেস ওয়াশ রয়েছে।"
+৩. কাস্টমার যদি এমন কোনো পণ্যের কথা বলে যা আমাদের তালিকায় নেই বা অন্য কোনো প্রোডাক্টের ছবি/নাম দেয়, কখনোই "আমাদের কাছে শুধু অমুক অমুক প্রোডাক্ট আছে" বা "দুঃখিত আমাদের কাছে নেই" বলবে না। সরাসরি বলবে:
+"আপনার কোন প্রোডাক্টটি লাগবে? দয়া করে প্রোডাক্টের নাম অথবা একটি ছবি দিন, আমি চেক করে জানাচ্ছি।"
+এবং উত্তরের শেষে লিখবে [NEED_BOSS_HELP]।
 ৪. কাস্টমার অর্ডার করতে চাইলে এই ফর্মটি পূরণ করতে বলবে:
 নাম : 
 জেলা : 
@@ -56,7 +58,7 @@ ${storeInfo}
 গ্রাম বা রোড নং : 
 মোবাইল নাম্বার : 
 কি প্রডাক্ট নিতে চাচ্ছেন :
-৫. তথ্য দিলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং শেষে [ORDER_DONE] লিখবে।
+৫. সব তথ্য পেয়ে গেলে বলবে: "আপনার অর্ডারটি কনফার্ম করা হয়েছে✅ ধৈর্য ধরে অপেক্ষা করুন, ২-৩ দিনের মধ্যে প্রোডাক্ট হাতে পাবেন।" এবং শেষে [ORDER_DONE] লিখবে।
 `;
 
     const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
@@ -76,7 +78,7 @@ ${storeInfo}
         const data = await response.json();
         if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
           const reply = data.candidates[0].content.parts[0].text.trim();
-          history.push({ role: 'model', parts: [{ text: reply.replace('[ORDER_DONE]', '').trim() }] });
+          history.push({ role: 'model', parts: [{ text: reply.replace(/\[ORDER_DONE\]|\[NEED_BOSS_HELP\]/g, '').trim() }] });
           conversationMemory.set(jid, history);
           return reply;
         }
@@ -84,7 +86,7 @@ ${storeInfo}
     }
   }
 
-  // ফেইল-সেফ অটোমেটিক রিপ্লাই (API ডাউন হলেও কাজ করবে)
+  // ফেইল-সেফ ব্যাকআপ লজিক
   const lower = userText.toLowerCase();
   if (lower.includes('sakura') || lower.includes('সাকুরা') || lower.includes('mud')) {
     return 'সাকুরা মাড মাস্ক ১ প্যাকেট ২৪০ টাকা (১২ পিস থাকে)। ব্রাহ্মণবাড়িয়ার ভেতর ডেলিভারি ৭০ টাকা, বাইরে ১২০ টাকা।';
@@ -99,7 +101,7 @@ ${storeInfo}
     return "অর্ডার কনফার্ম করতে নিচের তথ্যগুলো লিখে পাঠান:\n\nনাম :\nজেলা :\nথানা :\nগ্রাম বা রোড নং :\nমোবাইল নাম্বার :\nকি প্রডাক্ট নিতে চাচ্ছেন :";
   }
 
-  return 'জি, বলুন কীভাবে সাহায্য করতে পারি? আপনি সাকুরা মাড মাস্ক, শিট মাস্ক নাকি রাইস ফেস ওয়াশ নিতে চাচ্ছেন?';
+  return 'আপনার কোন প্রোডাক্টটি লাগবে? দয়া করে প্রোডাক্টের নাম অথবা একটি ছবি দিন, আমি চেক করে জানাচ্ছি। [NEED_BOSS_HELP]';
 }
 
 async function startBot() {
@@ -154,6 +156,15 @@ async function startBot() {
         let aiReply = await callGemini(jid, cleanText);
         if (!aiReply) continue;
 
+        // নতুন প্রোডাক্ট বা হেল্প দরকার হলে বসকে মেসেজ পাঠানো
+        if (aiReply.includes('[NEED_BOSS_HELP]')) {
+          aiReply = aiReply.replace('[NEED_BOSS_HELP]', '').trim();
+          await sock.sendMessage(`${BOSS_PHONE_NUMBER}@s.whatsapp.net`, {
+            text: `⚠️ *কাস্টমারের অন্য প্রোডাক্টের অনুসন্ধান!*\nকাস্টমার: ${jid.replace(/@.+/, '')}\nমেসেজ: "${cleanText}"`
+          });
+        }
+
+        // অর্ডার কনফার্ম হলে বসকে অ্যালার্ট
         if (aiReply.includes('[ORDER_DONE]')) {
           aiReply = aiReply.replace('[ORDER_DONE]', '').trim();
           await sock.sendMessage(`${BOSS_PHONE_NUMBER}@s.whatsapp.net`, {
@@ -175,7 +186,6 @@ app.get('/', (req, res) => {
       <div style="text-align:center;margin-top:60px;font-family:sans-serif;">
         <h2>WhatsApp পেয়ারিং কোড:</h2>
         <h1 style="font-size:45px;color:#16a34a;letter-spacing:6px;background:#f3f4f6;display:inline-block;padding:10px 25px;border-radius:10px;">${currentPairingCode}</h1>
-        <p style="color:#666;">কোডটি আসার পর পরই WhatsApp-এ বসান (মেয়াদ মাত্র ২ মিনিট)</p>
       </div>
     `);
   } else {
