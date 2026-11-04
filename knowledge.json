@@ -1,30 +1,29 @@
 {
-  "shop_info": {
-    "name": "RS SHOP BD",
-    "delivery_charge": {
-      "inside_brahmanbaria": 70,
-      "outside_brahmanbaria": 120
-    },
-    "delivery_time": "২-৩ দিন"
+  "shop_name": "RS SHOP BD",
+  "delivery": {
+    "inside_brahmanbaria": 70,
+    "outside_brahmanbaria": 120,
+    "duration": "২-৩ দিন",
+    "cod": true
   },
   "products": [
     {
       "name": "সাকুরা মাড মাস্ক (Sakura Mud Mask)",
       "price": 240,
       "unit": "১ প্যাকেট (১২ পিস)",
-      "keywords": ["sakura", "mud mask", "সাকুরা", "মাড মাস্ক"]
+      "details": "ত্বক গভীরভাবে পরিষ্কার করে, বাড়তি তেল দূর করে ও ত্বক সফট রাখে।"
     },
     {
       "name": "শিট মাস্ক (Sheet Mask)",
       "price": 60,
       "unit": "১ পিস",
-      "keywords": ["sheet mask", "সিট মাস্ক", "শিট মাস্ক"]
+      "details": "ত্বককে ইনস্ট্যান্ট হাইড্রেট ও উজ্জ্বল করে।"
     },
     {
       "name": "রাইস ফেস ওয়াশ (Rice Face Wash)",
       "price": 850,
       "unit": "১ পিস",
-      "keywords": ["rice", "face wash", "রাইস", "ফেস ওয়াশ"]
+      "details": "ত্বক ভেতর থেকে ক্লিন করে গ্লো বাড়াতে সাহায্য করে।"
     }
   ],
   "order_form": "অর্ডার কনফার্ম করতে নিচের তথ্যগুলো লিখে পাঠান:\n\nনাম :\nজেলা :\nথানা :\nগ্রাম বা রোড নং :\nমোবাইল নাম্বার :\nকি প্রডাক্ট নিতে চাচ্ছেন :"
